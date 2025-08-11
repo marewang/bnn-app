@@ -358,10 +358,17 @@ function formatDigest({ soon = [], overdue = [] } = {}) {
   return header + body;
 }
 async function sendTelegramMessage({ chatId, text }) {
-  const res = await fetch("/api/telegram/send", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ chatId, text }) });
-  if (!res.ok) throw new Error("Gagal mengirim ke Telegram");
-  return res.json();
+  const res = await fetch("/api/telegram/send", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ chatId, text })
+  });
+  let data = {};
+  try { data = await res.json(); } catch (_) { /* ignore */ }
+  if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+  return data;
 }
+
 function TelegramBox({ soon = [], overdue = [] }) {
   const [chatId, setChatId] = useState(() => localStorage.getItem("tg_chat_id") || "");
   const [busy, setBusy] = useState(false);
