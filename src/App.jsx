@@ -1,17 +1,16 @@
 import React, { useEffect, useMemo, useState } from "react";
 import Dexie from "dexie";
 import { useLiveQuery } from "dexie-react-hooks";
-import { motion, AnimatePresence } from "framer-motion";
 import {
   Bell, Search, Download, Upload, CheckCircle2, AlertTriangle, Clock,
-  Home, UserPlus, List, SlidersHorizontal, ArrowUpDown, Phone, Send, Link as LinkIcon, Bug
+  Home, UserPlus, List, SlidersHorizontal, ArrowUpDown, Bug
 } from "lucide-react";
 import {
   BrowserRouter as Router, Routes, Route, Navigate, Outlet,
   useLocation, useNavigate
 } from "react-router-dom";
 
-/* ====================== Error Boundary (enhanced) ====================== */
+/* ====================== Error Boundary (verbose) ====================== */
 class PageBoundary extends React.Component {
   constructor(p){ super(p); this.state = { hasError: false, err: null }; }
   static getDerivedStateFromError(err){ return { hasError: true, err }; }
@@ -19,7 +18,7 @@ class PageBoundary extends React.Component {
   render(){
     if (this.state.hasError) {
       const message = this.state.err?.message || String(this.state.err || "Unknown error");
-      const stack = (this.state.err && this.state.err.stack) ? String(this.state.err.stack).split("\n").slice(0,3).join("\n") : "";
+      const stack = (this.state.err && this.state.err.stack) ? String(this.state.err.stack).split("\n").slice(0,5).join("\n") : "";
       return <div className="p-6 border rounded-xl bg-rose-50 text-rose-700 text-sm space-y-2">
         <div className="font-semibold">Terjadi error saat menampilkan halaman.</div>
         <div><b>Pesan:</b> <code>{message}</code></div>
@@ -67,7 +66,7 @@ const withinNextDays = (d, days) => {
   return typeof n === "number" && n >= 0 && n <= days;
 };
 
-/* ====================== Self tests ====================== */
+/* ====================== Self tests & data diagnostics ====================== */
 function runSelfTests() {
   try {
     const base = new Date("2020-03-15");
@@ -76,6 +75,16 @@ function runSelfTests() {
     console.assert(human("bukan tanggal") === "-");
     console.assert(daysUntil("bukan tanggal") === null);
   } catch {}
+}
+function logBadRows(rows=[]) {
+  try {
+    const bad = [];
+    rows.forEach((r, i) => {
+      ["tmtPns","riwayatTmtKgb","riwayatTmtPangkat","jadwalKgbBerikutnya","jadwalPangkatBerikutnya"]
+        .forEach((k) => { const v = r?.[k]; if (v && !parseDate(v)) bad.push({i, id:r?.id, field:k, value:v}); });
+    });
+    if (bad.length) console.warn("Baris dengan tanggal invalid:", bad);
+  } catch (e) { console.warn("diagnostic failed", e); }
 }
 
 const AppCtx = React.createContext(null);
@@ -93,6 +102,7 @@ db.version(2).stores({
 export default function App() {
   useEffect(() => runSelfTests(), []);
   const asns = useLiveQuery(() => db.table("asns").toArray(), [], []);
+  useEffect(() => { if (Array.isArray(asns)) logBadRows(asns); }, [asns]);
 
   const notif = useMemo(() => {
     try {
@@ -159,11 +169,8 @@ function Shell({ children }) {
           </div>
         </div>
 
-        <AnimatePresence mode="wait">
-          <motion.div key={pathname} initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: 10 }}>
-            {children}
-          </motion.div>
-        </AnimatePresence>
+        {/* No framer-motion here to reduce moving parts */}
+        <div>{children}</div>
       </div>
     </div>
   );
@@ -232,7 +239,7 @@ function FormInput() {
   );
 }
 
-/* ====================== Tabel Data (extra guards) ====================== */
+/* ====================== Tabel Data ====================== */
 function TabelData() {
   const asns = useLiveQuery(() => db.table("asns").toArray(), [], []);
   const [q, setQ] = useState("");
@@ -265,6 +272,11 @@ function TabelData() {
       return [];
     }
   }, [asns, q, statusFilter, sortAsc]);
+
+  // quick-visible diagnostic line
+  if (!Array.isArray(asns)) {
+    return <div className="p-4 rounded-lg border bg-amber-50 text-amber-800 text-sm">Data belum tersedia / database kosong.</div>;
+  }
 
   return (
     <Card title="Tampilkan Data Pegawai" subtitle="Cari, filter, dan urutkan data pegawai." extra={
@@ -324,7 +336,7 @@ function TabelData() {
   );
 }
 
-/* ====================== Dashboard & Notifikasi (unchanged logic) ====================== */
+/* ====================== Dashboard & Notifikasi (simple) ====================== */
 function PanelDashboard() {
   const { asns = [], notif = { soon: [], overdue: [] } } = useApp() || {};
   const total = asns.length;
@@ -354,74 +366,22 @@ function PanelDashboard() {
 }
 
 function PanelNotifikasi() {
-  const { notif = { soon: [], overdue: [] } } = useApp() || {};
-  const [chatId, setChatId] = useState(() => localStorage.getItem("tg_chat_id") || "");
+  const [status, setStatus] = useState(null);
   const [busy, setBusy] = useState(false);
-  const saveChatId = () => { localStorage.setItem("tg_chat_id", chatId.trim()); alert("Chat ID disimpan."); };
-
-  const groupText = (items, jenis) => {
-    const list = items.filter((x) => x.jenis === jenis);
-    if (!list.length) return "(tidak ada)";
-    const fmtDate = (d) => {
-      const dt = parseDate(d);
-      return dt ? dt.toLocaleDateString("id-ID", { day: "2-digit", month: "short", year: "numeric" }) : "-";
-    };
-    return list.map((r) => `• <b>${r.nama}</b> (${r.nip}) — ${r.jenis}: <b>${fmtDate(r.tanggal)}</b>` + (parseDate(r.tanggal) && parseDate(r.tanggal) < new Date() ? ` (terlewat ${Math.abs(daysUntil(r.tanggal))}h)` : ` (sisa ${daysUntil(r.tanggal) ?? "-"}h)`)).join("\\n");
+  const cek = async () => {
+    try { setBusy(true); const res = await fetch("/api/telegram/diag"); const data = await res.json(); setStatus({ ok: res.ok, ...data }); }
+    catch (e) { setStatus({ ok: false, error: String(e) }); }
+    finally { setBusy(false); }
   };
-
-  const buildDigest = () => {
-    const header = `<b>🔔 Ringkasan Notifikasi ASN</b>\\n${new Date().toLocaleString("id-ID")}\\n\\n`;
-    const body = [
-      `<b>Segera (≤ 90 hari)</b>`,
-      `• <u>Kenaikan Gaji Berikutnya</u>`, groupText(notif.soon || [], "Kenaikan Gaji Berikutnya") || "(tidak ada)",
-      `• <u>Kenaikan Pangkat Berikutnya</u>`, groupText(notif.soon || [], "Kenaikan Pangkat Berikutnya") || "(tidak ada)",
-      "",
-      `<b>Terlewat</b>`,
-      `• <u>Kenaikan Gaji Berikutnya</u>`, groupText(notif.overdue || [], "Kenaikan Gaji Berikutnya") || "(tidak ada)",
-      `• <u>Kenaikan Pangkat Berikutnya</u>`, groupText(notif.overdue || [], "Kenaikan Pangkat Berikutnya") || "(tidak ada)",
-    ].join("\\n");
-    return header + body;
-  };
-
-  const sendNow = async () => {
-    try {
-      setBusy(true);
-      const text = buildDigest();
-      const res = await fetch("/api/telegram/send", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ chatId: chatId.trim(), text }) });
-      const data = await res.json().catch(()=>({}));
-      if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
-      alert("Ringkasan terkirim ke Telegram");
-    } catch (e) {
-      alert(e.message || "Gagal kirim");
-    } finally {
-      setBusy(false);
-    }
-  };
-
   return (
     <div className="grid grid-cols-1 gap-6">
-      <Card title="Kirim Ringkasan (Manual)" subtitle="Masukkan Chat ID & kirim ringkasan notifikasi.">
-        <div className="flex flex-col md:flex-row gap-3 items-start md:items-end">
-          <div className="flex-1">
-            <FormRow label="Telegram Chat ID" required>
-              <input value={chatId} onChange={(e) => setChatId(e.target.value)} placeholder="contoh: 123456789" className="w-full border rounded-lg px-3 py-2" />
-            </FormRow>
-            <p className="text-xs text-slate-500 mt-1">Kirim pesan ke bot, lalu dapatkan Chat ID via @userinfobot atau @RawDataBot.</p>
-          </div>
-          <div className="flex gap-2">
-            <button onClick={saveChatId} className="border rounded-lg px-4 py-2 hover:bg-slate-50">Simpan</button>
-            <button onClick={sendNow} disabled={!chatId || busy} className={`rounded-lg px-4 py-2 text-white ${busy ? "bg-indigo-400" : "bg-indigo-600 hover:bg-indigo-700"}`}>{busy ? "Mengirim..." : "Kirim Sekarang"}</button>
-          </div>
-        </div>
-      </Card>
-
-      <DiagnosticsCard />
+      <DiagnosticsCard onCheck={cek} status={status} busy={busy} />
     </div>
   );
 }
 
 function NotifItem({ r, tone = "amber", overdue = false }) {
-  const Icon = overdue ? AlertTriangle : Bell;
+  const Icon = overdue ? AlertTriangle : AlertTriangle;
   const d = daysUntil(r.tanggal);
   const days = typeof d === "number" ? Math.abs(d) : "-";
   return (
@@ -439,32 +399,16 @@ function NotifItem({ r, tone = "amber", overdue = false }) {
     </div>
   );
 }
-
 function NotifList({ items = [], tone = "amber", overdue = false, emptyText = "Tidak ada data." }) {
   if (!items.length) return <EmptyState text={emptyText} />;
   return <div className="space-y-3">{items.map((r, idx) => (<NotifItem key={`${r.id ?? idx}-${r.jenis}`} r={r} tone={tone} overdue={overdue} />))}</div>;
 }
 
-/* ====================== Diagnostics ====================== */
-function DiagnosticsCard() {
-  const [status, setStatus] = useState(null);
-  const [busy, setBusy] = useState(false);
-  const cek = async () => {
-    try {
-      setBusy(true);
-      const res = await fetch("/api/telegram/diag");
-      const data = await res.json();
-      setStatus({ ok: res.ok, ...data });
-      window.__diag = data;
-    } catch (e) {
-      setStatus({ ok: false, error: String(e) });
-    } finally {
-      setBusy(false);
-    }
-  };
+/* ====================== Diagnostics card ====================== */
+function DiagnosticsCard({ onCheck, status, busy }) {
   return (
     <Card title="Diagnostik Bot Telegram" subtitle="Cek env di server & koneksi ke Telegram." extra={
-      <button onClick={cek} disabled={busy} className="rounded-lg px-3 py-1.5 border bg-white hover:bg-slate-50 inline-flex items-center gap-2">
+      <button onClick={onCheck} disabled={busy} className="rounded-lg px-3 py-1.5 border bg-white hover:bg-slate-50 inline-flex items-center gap-2">
         <Bug className="w-4 h-4" /> {busy ? "Memeriksa..." : "Cek Status Bot"}
       </button>
     }>
@@ -501,8 +445,8 @@ function StatusPill({ label, target }) {
 }
 function EmptyState({ text }) { return <div className="text-sm text-slate-500 border border-dashed rounded-xl p-4">{text}</div>; }
 function IconButton({ children, onClick, title }) { return (<button onClick={onClick} title={title} className="px-2.5 py-2 rounded-lg border inline-flex items-center gap-2 hover:bg-slate-50">{children}</button>); }
-function Th({ children, align = "left" }) { return <th className={`p-3 border-b text-${align}`}>{children}</th>; }
-function Td({ children, align = "left" }) { return <td className={`p-3 border-b text-${align}`}>{children}</td>; }
+function Th({ children, align = "left" }) { return <th className={`p-3 border-b text-left`}>{children}</th>; }
+function Td({ children, align = "left" }) { return <td className={`p-3 border-b text-left`}>{children}</td>; }
 
 /* ====================== Export/Import ====================== */
 function exportJSON(rows = []) {
