@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState } from "react";
 import Dexie from "dexie";
-import { useLiveQuery } from "dexie-react-hooks";
+// import { useLiveQuery } from "dexie-react-hooks"; // REMOVED to avoid runtime errors on some browsers
 import {
   Bell, Search, Download, Upload, CheckCircle2, AlertTriangle, Clock,
   Home, UserPlus, List, SlidersHorizontal, ArrowUpDown, Bug
@@ -10,7 +10,7 @@ import {
   useLocation, useNavigate
 } from "react-router-dom";
 
-/* ====================== Error Boundary (verbose) ====================== */
+/* ====================== Error Boundary (top-level) ====================== */
 class PageBoundary extends React.Component {
   constructor(p){ super(p); this.state = { hasError: false, err: null }; }
   static getDerivedStateFromError(err){ return { hasError: true, err }; }
@@ -18,7 +18,7 @@ class PageBoundary extends React.Component {
   render(){
     if (this.state.hasError) {
       const message = this.state.err?.message || String(this.state.err || "Unknown error");
-      const stack = (this.state.err && this.state.err.stack) ? String(this.state.err.stack).split("\n").slice(0,5).join("\n") : "";
+      const stack = (this.state.err && this.state.err.stack) ? String(this.state.err.stack).split("\n").slice(0,6).join("\n") : "";
       return <div className="p-6 border rounded-xl bg-rose-50 text-rose-700 text-sm space-y-2">
         <div className="font-semibold">Terjadi error saat menampilkan halaman.</div>
         <div><b>Pesan:</b> <code>{message}</code></div>
@@ -87,10 +87,7 @@ function logBadRows(rows=[]) {
   } catch (e) { console.warn("diagnostic failed", e); }
 }
 
-const AppCtx = React.createContext(null);
-const useApp = () => React.useContext(AppCtx);
-
-/* ====================== Dexie ====================== */
+/* ====================== DB Layer ====================== */
 const db = new Dexie("asnMonitoringDB");
 db.version(1).stores({
   asns: "++id, nama, nip, tmtPns, riwayatTmtKgb, riwayatTmtPangkat, jadwalKgbBerikutnya, jadwalPangkatBerikutnya",
@@ -99,14 +96,50 @@ db.version(2).stores({
   asns: "++id, nama, nip, telp, telegramChatId, tmtPns, riwayatTmtKgb, riwayatTmtPangkat, jadwalKgbBerikutnya, jadwalPangkatBerikutnya",
 });
 
+async function safeToArray() {
+  try { return await db.table("asns").toArray(); }
+  catch (e) { console.error("Dexie toArray error:", e); return []; }
+}
+
+async function safeAdd(row) {
+  try { return await db.table("asns").add(row); }
+  catch (e) { console.error("Dexie add error:", e); throw e; }
+}
+
+async function safeBulkPut(rows) {
+  try { return await db.table("asns").bulkPut(rows); }
+  catch (e) { console.error("Dexie bulkPut error:", e); throw e; }
+}
+
+/* Custom polling hook to avoid useLiveQuery runtime issues */
+function useAsns() {
+  const [rows, setRows] = useState([]);
+  const [dbErr, setDbErr] = useState(null);
+  useEffect(() => {
+    let cancel = false;
+    const load = async () => {
+      try {
+        const arr = await safeToArray();
+        if (!cancel) setRows(arr);
+      } catch (e) { if (!cancel) setDbErr(e); }
+    };
+    load();
+    const t = setInterval(load, 2000);
+    return () => { cancel = true; clearInterval(t); };
+  }, []);
+  return { rows, dbErr };
+}
+
+const AppCtx = React.createContext(null);
+const useApp = () => React.useContext(AppCtx);
+
 export default function App() {
   useEffect(() => runSelfTests(), []);
-  const asns = useLiveQuery(() => db.table("asns").toArray(), [], []);
+  const { rows: asns, dbErr } = useAsns();
   useEffect(() => { if (Array.isArray(asns)) logBadRows(asns); }, [asns]);
 
   const notif = useMemo(() => {
     try {
-      if (!asns) return { soon: [], overdue: [] };
       const soon = []; const overdue = []; const in90 = (d) => withinNextDays(d, 90);
       (Array.isArray(asns) ? asns : []).forEach((row) => {
         const items = [];
@@ -130,12 +163,12 @@ export default function App() {
   return (
     <Router>
       <Routes>
-        <Route path="/" element={<Shell><AppCtx.Provider value={{ asns: asns || [], notif }}><Outlet /></AppCtx.Provider></Shell>}>
+        <Route path="/" element={<PageBoundary><Shell><AppCtx.Provider value={{ asns: asns || [], notif, dbErr }}><Outlet /></AppCtx.Provider></Shell></PageBoundary>}>
           <Route index element={<Navigate to="dashboard" replace />} />
           <Route path="dashboard" element={<PanelDashboard />} />
           <Route path="notifikasi" element={<PanelNotifikasi />} />
           <Route path="input" element={<FormInput />} />
-          <Route path="data" element={<PageBoundary><TabelData /></PageBoundary>} />
+          <Route path="data" element={<TabelData />} />
         </Route>
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
@@ -169,7 +202,6 @@ function Shell({ children }) {
           </div>
         </div>
 
-        {/* No framer-motion here to reduce moving parts */}
         <div>{children}</div>
       </div>
     </div>
@@ -194,7 +226,7 @@ function FormInput() {
   const onChange = (e) => setForm({ ...form, [e.target.name]: e.target.value });
 
   const doSave = async () => {
-    await db.table("asns").add({ ...form, createdAt: new Date().toISOString() });
+    await safeAdd({ ...form, createdAt: new Date().toISOString() });
     setForm({ nama: "", nip: "", telp: "", telegramChatId: "", tmtPns: "", riwayatTmtKgb: "", riwayatTmtPangkat: "", jadwalKgbBerikutnya: "", jadwalPangkatBerikutnya: "" });
     setConfirmOpen(false);
     alert("Data ASN disimpan.");
@@ -241,11 +273,13 @@ function FormInput() {
 
 /* ====================== Tabel Data ====================== */
 function TabelData() {
-  const asns = useLiveQuery(() => db.table("asns").toArray(), [], []);
+  const { asns = [], dbErr } = useApp() || {};
   const [q, setQ] = useState("");
   const [statusFilter, setStatusFilter] = useState("all");
   const [compact, setCompact] = useState(false);
   const [sortAsc, setSortAsc] = useState(true);
+
+  useEffect(() => { if (dbErr) console.error("DB error:", dbErr); }, [dbErr]);
 
   const filtered = useMemo(() => {
     try {
@@ -272,11 +306,6 @@ function TabelData() {
       return [];
     }
   }, [asns, q, statusFilter, sortAsc]);
-
-  // quick-visible diagnostic line
-  if (!Array.isArray(asns)) {
-    return <div className="p-4 rounded-lg border bg-amber-50 text-amber-800 text-sm">Data belum tersedia / database kosong.</div>;
-  }
 
   return (
     <Card title="Tampilkan Data Pegawai" subtitle="Cari, filter, dan urutkan data pegawai." extra={
@@ -336,7 +365,7 @@ function TabelData() {
   );
 }
 
-/* ====================== Dashboard & Notifikasi (simple) ====================== */
+/* ====================== Dashboard & Notifikasi ====================== */
 function PanelDashboard() {
   const { asns = [], notif = { soon: [], overdue: [] } } = useApp() || {};
   const total = asns.length;
@@ -445,8 +474,8 @@ function StatusPill({ label, target }) {
 }
 function EmptyState({ text }) { return <div className="text-sm text-slate-500 border border-dashed rounded-xl p-4">{text}</div>; }
 function IconButton({ children, onClick, title }) { return (<button onClick={onClick} title={title} className="px-2.5 py-2 rounded-lg border inline-flex items-center gap-2 hover:bg-slate-50">{children}</button>); }
-function Th({ children, align = "left" }) { return <th className={`p-3 border-b text-left`}>{children}</th>; }
-function Td({ children, align = "left" }) { return <td className={`p-3 border-b text-left`}>{children}</td>; }
+function Th({ children }) { return <th className="p-3 border-b text-left">{children}</th>; }
+function Td({ children }) { return <td className="p-3 border-b text-left">{children}</td>; }
 
 /* ====================== Export/Import ====================== */
 function exportJSON(rows = []) {
@@ -462,10 +491,11 @@ function importJSON() {
     const file = e.target.files && e.target.files[0];
     if (!file) return;
     const text = await file.text();
-    const data = JSON.parse(text);
+    let data;
+    try { data = JSON.parse(text); } catch { return alert("Format JSON tidak valid"); }
     if (!Array.isArray(data)) return alert("Format JSON tidak valid");
-    await db.table("asns").bulkPut(data.map((r) => ({ ...r })));
-    alert("Import selesai");
+    try { await safeBulkPut(data.map((r) => ({ ...r }))); alert("Import selesai"); }
+    catch (e) { alert("Gagal import: " + (e?.message || e)); }
   };
   input.click();
 }
