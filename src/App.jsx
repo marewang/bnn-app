@@ -11,29 +11,27 @@ import {
   useLocation, useNavigate
 } from "react-router-dom";
 
-/** =====================================================================
- *  FIX: Blank screen prevention
- *  - Safe date helpers that tolerate invalid/empty dates
- *  - StatusPill & table calculations guard against null
- *  - PageBoundary to avoid entire page going blank on runtime errors
- *  ===================================================================== */
-
-// Error boundary (simple)
+/* ====================== Error Boundary (enhanced) ====================== */
 class PageBoundary extends React.Component {
   constructor(p){ super(p); this.state = { hasError: false, err: null }; }
   static getDerivedStateFromError(err){ return { hasError: true, err }; }
-  componentDidCatch(err, info){ console.error("Page error:", err, info); }
+  componentDidCatch(err, info){ console.error("Page error:", err, info); window.__lastPageError = {err, info}; }
   render(){
     if (this.state.hasError) {
-      return <div className="p-6 border rounded-xl bg-rose-50 text-rose-700">
-        Terjadi error saat menampilkan halaman. Detail ada di Console.
+      const message = this.state.err?.message || String(this.state.err || "Unknown error");
+      const stack = (this.state.err && this.state.err.stack) ? String(this.state.err.stack).split("\n").slice(0,3).join("\n") : "";
+      return <div className="p-6 border rounded-xl bg-rose-50 text-rose-700 text-sm space-y-2">
+        <div className="font-semibold">Terjadi error saat menampilkan halaman.</div>
+        <div><b>Pesan:</b> <code>{message}</code></div>
+        {stack && <pre className="text-xs whitespace-pre-wrap bg-white/60 p-3 rounded border">{stack}</pre>}
+        <div className="text-slate-600">Detail lengkap ada di Console (window.__lastPageError).</div>
       </div>;
     }
     return this.props.children;
   }
 }
 
-// Safe date helpers
+/* ====================== Safe Date Helpers ====================== */
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
 const parseDate = (v) => {
   if (!v) return null;
@@ -69,7 +67,7 @@ const withinNextDays = (d, days) => {
   return typeof n === "number" && n >= 0 && n <= days;
 };
 
-// Self tests (keep lightweight)
+/* ====================== Self tests ====================== */
 function runSelfTests() {
   try {
     const base = new Date("2020-03-15");
@@ -83,7 +81,7 @@ function runSelfTests() {
 const AppCtx = React.createContext(null);
 const useApp = () => React.useContext(AppCtx);
 
-// Dexie (same schema used previously; includes phone + telegram chat id optional)
+/* ====================== Dexie ====================== */
 const db = new Dexie("asnMonitoringDB");
 db.version(1).stores({
   asns: "++id, nama, nip, tmtPns, riwayatTmtKgb, riwayatTmtPangkat, jadwalKgbBerikutnya, jadwalPangkatBerikutnya",
@@ -97,19 +95,26 @@ export default function App() {
   const asns = useLiveQuery(() => db.table("asns").toArray(), [], []);
 
   const notif = useMemo(() => {
-    if (!asns) return { soon: [], overdue: [] };
-    const soon = []; const overdue = []; const in90 = (d) => withinNextDays(d, 90);
-    asns.forEach((row) => {
-      const items = [];
-      if (row.jadwalKgbBerikutnya) items.push({ jenis: "Kenaikan Gaji Berikutnya", tanggal: row.jadwalKgbBerikutnya });
-      if (row.jadwalPangkatBerikutnya) items.push({ jenis: "Kenaikan Pangkat Berikutnya", tanggal: row.jadwalPangkatBerikutnya });
-      items.forEach((it) => {
-        if (in90(it.tanggal)) soon.push({ ...row, ...it });
-        else if (parseDate(it.tanggal) && parseDate(it.tanggal) < new Date()) overdue.push({ ...row, ...it });
+    try {
+      if (!asns) return { soon: [], overdue: [] };
+      const soon = []; const overdue = []; const in90 = (d) => withinNextDays(d, 90);
+      (Array.isArray(asns) ? asns : []).forEach((row) => {
+        const items = [];
+        if (row.jadwalKgbBerikutnya) items.push({ jenis: "Kenaikan Gaji Berikutnya", tanggal: row.jadwalKgbBerikutnya });
+        if (row.jadwalPangkatBerikutnya) items.push({ jenis: "Kenaikan Pangkat Berikutnya", tanggal: row.jadwalPangkatBerikutnya });
+        items.forEach((it) => {
+          const dt = parseDate(it.tanggal);
+          if (!dt) return;
+          if (in90(dt)) soon.push({ ...row, ...it });
+          else if (dt < new Date()) overdue.push({ ...row, ...it });
+        });
       });
-    });
-    const byDate = (a, b) => (parseDate(a.tanggal)?.getTime() ?? 0) - (parseDate(b.tanggal)?.getTime() ?? 0);
-    return { soon: soon.sort(byDate), overdue: overdue.sort(byDate) };
+      const byDate = (a, b) => (parseDate(a.tanggal)?.getTime() ?? 0) - (parseDate(b.tanggal)?.getTime() ?? 0);
+      return { soon: soon.sort(byDate), overdue: overdue.sort(byDate) };
+    } catch (e) {
+      console.error("notif calc error", e);
+      return { soon: [], overdue: [] };
+    }
   }, [asns]);
 
   return (
@@ -119,7 +124,6 @@ export default function App() {
           <Route index element={<Navigate to="dashboard" replace />} />
           <Route path="dashboard" element={<PanelDashboard />} />
           <Route path="notifikasi" element={<PanelNotifikasi />} />
-          {/* Wrap data page with boundary to prevent total blank */}
           <Route path="input" element={<FormInput />} />
           <Route path="data" element={<PageBoundary><TabelData /></PageBoundary>} />
         </Route>
@@ -165,7 +169,7 @@ function Shell({ children }) {
   );
 }
 
-// ====== Form Input (singkat, fokus pada jadwal auto & validation) ======
+/* ====================== Form Input ====================== */
 function FormInput() {
   const [form, setForm] = useState({
     nama: "", nip: "", telp: "", telegramChatId: "",
@@ -189,7 +193,7 @@ function FormInput() {
     alert("Data ASN disimpan.");
   };
 
-  const submit = (e) => { e.preventDefault(); if (!form.nama || !form.nip) return; setConfirmOpen(true); };
+  const submit = (e) => { e.preventDefault(); if (!form.nama || !form.nip) return alert("Nama & NIP wajib diisi"); setConfirmOpen(true); };
 
   return (
     <div className="grid grid-cols-1 gap-6">
@@ -228,7 +232,7 @@ function FormInput() {
   );
 }
 
-// ====== Table/Data (fixed) ======
+/* ====================== Tabel Data (extra guards) ====================== */
 function TabelData() {
   const asns = useLiveQuery(() => db.table("asns").toArray(), [], []);
   const [q, setQ] = useState("");
@@ -237,31 +241,29 @@ function TabelData() {
   const [sortAsc, setSortAsc] = useState(true);
 
   const filtered = useMemo(() => {
-    if (!asns) return [];
-    const term = q.trim().toLowerCase();
-    const withMeta = (asns || []).map((r) => {
-      const dueInKgb = daysUntil(r.jadwalKgbBerikutnya);
-      const dueInPangkat = daysUntil(r.jadwalPangkatBerikutnya);
-      const nearest = Math.min(
-        dueInKgb ?? Infinity,
-        dueInPangkat ?? Infinity
-      );
-      let status = "ok";
-      if (!Number.isFinite(nearest)) status = "ok";
-      else if (nearest < 0) status = "overdue";
-      else if (nearest <= 90) status = "soon";
-      return { ...r, dueInKgb, dueInPangkat, nearest, status };
-    });
-    let list = withMeta;
-    if (term) list = list.filter((r) =>
-      (r.nama || "").toLowerCase().includes(term) ||
-      (r.nip || "").toLowerCase().includes(term) ||
-      (r.telp || "").toLowerCase().includes(term)
-    );
-    if (statusFilter !== "all") list = list.filter((r) => r.status === statusFilter);
-    list.sort((a, b) => (a.nama || "").localeCompare(b.nama || "", "id", { sensitivity: "base" }));
-    if (!sortAsc) list.reverse();
-    return list;
+    try {
+      const src = Array.isArray(asns) ? asns : [];
+      const term = q.trim().toLowerCase();
+      const withMeta = src.map((r) => {
+        const dueInKgb = daysUntil(r.jadwalKgbBerikutnya);
+        const dueInPangkat = daysUntil(r.jadwalPangkatBerikutnya);
+        const nearest = Math.min(dueInKgb ?? Infinity, dueInPangkat ?? Infinity);
+        let status = "ok";
+        if (!Number.isFinite(nearest)) status = "ok";
+        else if (nearest < 0) status = "overdue";
+        else if (nearest <= 90) status = "soon";
+        return { ...r, dueInKgb, dueInPangkat, nearest, status };
+      });
+      let list = withMeta;
+      if (term) list = list.filter((r) => (r.nama || "").toLowerCase().includes(term) || (r.nip || "").toLowerCase().includes(term) || (r.telp || "").toLowerCase().includes(term));
+      if (statusFilter !== "all") list = list.filter((r) => r.status === statusFilter);
+      list.sort((a, b) => (a.nama || "").localeCompare(b.nama || "", "id", { sensitivity: "base" }));
+      if (!sortAsc) list.reverse();
+      return list;
+    } catch (e) {
+      console.error("table calc error", e);
+      return [];
+    }
   }, [asns, q, statusFilter, sortAsc]);
 
   return (
@@ -298,7 +300,7 @@ function TabelData() {
           </thead>
           <tbody>
             {filtered.map((r, idx) => (
-              <tr key={r.id} className={`group transition ${idx % 2 ? "bg-white" : "bg-slate-50/40"} hover:bg-indigo-50/30`}>
+              <tr key={r.id ?? idx} className={`group transition ${idx % 2 ? "bg-white" : "bg-slate-50/40"} hover:bg-indigo-50/30`}>
                 <Td>{r.nama}</Td>
                 <Td>{r.nip}</Td>
                 <Td>{r.telp || "-"}</Td>
@@ -322,7 +324,7 @@ function TabelData() {
   );
 }
 
-// ====== Dashboard (unchanged UI style) ======
+/* ====================== Dashboard & Notifikasi (unchanged logic) ====================== */
 function PanelDashboard() {
   const { asns = [], notif = { soon: [], overdue: [] } } = useApp() || {};
   const total = asns.length;
@@ -351,9 +353,8 @@ function PanelDashboard() {
   );
 }
 
-// ====== Notifikasi (ringkas, manual & diagnosa) ======
 function PanelNotifikasi() {
-  const { asns = [], notif = { soon: [], overdue: [] } } = useApp() || {};
+  const { notif = { soon: [], overdue: [] } } = useApp() || {};
   const [chatId, setChatId] = useState(() => localStorage.getItem("tg_chat_id") || "");
   const [busy, setBusy] = useState(false);
   const saveChatId = () => { localStorage.setItem("tg_chat_id", chatId.trim()); alert("Chat ID disimpan."); };
@@ -441,10 +442,10 @@ function NotifItem({ r, tone = "amber", overdue = false }) {
 
 function NotifList({ items = [], tone = "amber", overdue = false, emptyText = "Tidak ada data." }) {
   if (!items.length) return <EmptyState text={emptyText} />;
-  return <div className="space-y-3">{items.map((r) => (<NotifItem key={`${r.id}-${r.jenis}`} r={r} tone={tone} overdue={overdue} />))}</div>;
+  return <div className="space-y-3">{items.map((r, idx) => (<NotifItem key={`${r.id ?? idx}-${r.jenis}`} r={r} tone={tone} overdue={overdue} />))}</div>;
 }
 
-// Diagnostics UI
+/* ====================== Diagnostics ====================== */
 function DiagnosticsCard() {
   const [status, setStatus] = useState(null);
   const [busy, setBusy] = useState(false);
@@ -475,12 +476,12 @@ function DiagnosticsCard() {
   );
 }
 
-// Reusable UI
+/* ====================== Reusable UI ====================== */
 function Card({ title, subtitle, extra, children }) {
   return (
     <div className="rounded-2xl border border-slate-200 bg-white shadow-sm">
       <div className="px-5 py-4 border-b border-slate-200 flex items-center justify-between">
-        <div>{title && <h3 className="text_base font-semibold">{title}</h3>}{subtitle && <p className="text-xs text-slate-500 mt-0.5">{subtitle}</p>}</div>
+        <div>{title && <h3 className="text-base font-semibold">{title}</h3>}{subtitle && <p className="text-xs text-slate-500 mt-0.5">{subtitle}</p>}</div>
         {extra}
       </div>
       <div className="p-5">{children}</div>
@@ -503,7 +504,7 @@ function IconButton({ children, onClick, title }) { return (<button onClick={onC
 function Th({ children, align = "left" }) { return <th className={`p-3 border-b text-${align}`}>{children}</th>; }
 function Td({ children, align = "left" }) { return <td className={`p-3 border-b text-${align}`}>{children}</td>; }
 
-// Export/Import JSON
+/* ====================== Export/Import ====================== */
 function exportJSON(rows = []) {
   const blob = new Blob([JSON.stringify(rows, null, 2)], { type: "application/json" });
   const url = URL.createObjectURL(blob);
